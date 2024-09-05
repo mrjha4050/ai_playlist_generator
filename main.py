@@ -28,7 +28,7 @@ def get_spotify_client():
         sp = spotipy.Spotify(auth=token_info['access_token'])
         return sp
 
-    auth_code = st.experimental_get_query_params().get('code', None)
+    auth_code = st.query_params().get('code', None)
 
     if not auth_code:
         auth_url = sp_oauth.get_authorize_url()
@@ -36,7 +36,7 @@ def get_spotify_client():
         return None  
     else:
         token_info = sp_oauth.get_access_token(auth_code[0])
-        st.experimental_set_query_params()  
+        st.query_params()  
         sp = spotipy.Spotify(auth=token_info['access_token'])
         return sp
 
