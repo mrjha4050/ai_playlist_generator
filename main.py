@@ -42,50 +42,53 @@ def get_spotify_client():
         sp = spotipy.Spotify(auth=token_info['access_token'])
         return sp
 
-# Function to fetch generated songs from Llama 3 (or mock API)
-def fetch_songs_from_llama3(mood, language, song_type, num_songs=10):
+# Function to fetch suggested playlist name and songs from Groq
+def fetch_songs_and_playlist_name(mood, language, song_type, artist=None, num_songs=10):
     client = Groq(api_key=GROQ_API_KEY)
 
-    if song_type == "Mix":
-        prompt = (
-            f"Generate a mix of {num_songs} old and new {language} songs for someone who feels {mood}. "
-            "List them in the following format: Track Name - Artist."
-        )
-    else:
-        prompt = (
-            f"Generate a playlist of {num_songs} {language} {song_type} songs for someone who feels {mood}. "
-            "List them in the following format: Track Name - Artist."
-        )
+    # Refined prompt for generating songs and suggesting playlist name
+    prompt = (
+        f"Generate a playlist of {num_songs} {language} {song_type} songs for someone who feels {mood}. "
+        f"Also suggest a creative playlist name for this mood in {language}. "
+        "Each song should have a clear format as 'Track Name - Artist'."
+    )
+
+    if artist:
+        prompt += f" Include popular songs from or featuring the artist {artist}."
 
     chat_completion = client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
         model="llama3-8b-8192"
     )
 
-    song_recommendations = chat_completion.choices[0].message.content
-    return parse_songs(song_recommendations)
+    response = chat_completion.choices[0].message.content
+    return parse_songs_and_playlist_name(response)
 
-# Function to parse songs from the generated response
-def parse_songs(song_recommendations):
-    lines = song_recommendations.split("\n")
+# Function to parse songs and playlist name from the generated response
+def parse_songs_and_playlist_name(response):
+    lines = response.split("\n")
 
-    # Regular expression to match the "Track Name - Artist" pattern
     song_pattern = re.compile(r'^\d+\.\s*"?(.+?)"?\s*-\s*(.+)$')
     
     song_list = []
+    playlist_name = "My Mood Playlist"  # Default name
+    playlist_name_found = False
+
     for line in lines:
-        # Ignore empty lines and non-song description lines
         line = line.strip()
-        if not line or " - " not in line or "Here" in line:
+
+        if not line or " - " not in line:
+            if "playlist name" in line.lower() and not playlist_name_found:
+                # Look for playlist name suggestion from the model
+                playlist_name = line.split(":")[-1].strip().capitalize()
+                playlist_name_found = True
             continue
 
-        # Try to match each line with the song pattern
         match = song_pattern.match(line)
         if match:
             track_name = match.group(1).strip()
             artist_name = match.group(2).strip()
 
-            # Handle cases where movie names are in parentheses
             track_name = re.sub(r"\(.*?\)", "", track_name).strip()
             artist_name = re.sub(r"\(.*?\)", "", artist_name).strip()
 
@@ -94,8 +97,9 @@ def parse_songs(song_recommendations):
             st.warning(f"Could not parse song data: {line}")
 
     unique_song_list = list(dict.fromkeys(song_list))
-    return unique_song_list
+    return unique_song_list, playlist_name
 
+# Function to create Spotify playlist
 def create_spotify_playlist(sp, song_list, playlist_name):
     if song_list:
         user_id = sp.current_user()["id"]
@@ -106,22 +110,20 @@ def create_spotify_playlist(sp, song_list, playlist_name):
             try:
                 track_name, artist_name = song.split(" - ")
 
-                result = sp.search(q=f"track:{track_name}", type="track", limit=5)
+                result = sp.search(q=f"track:{track_name} artist:{artist_name}", type="track", limit=5)
+
+                if not result['tracks']['items']:
+                    result = sp.search(q=f"track:{track_name}", type="track", limit=5)
 
                 if result['tracks']['items']:
-                    st.write(f"Top search results for '{track_name}':")
+                    st.write(f"Search results for '{track_name}':")
                     for item in result['tracks']['items']:
                         st.write(f"Track: {item['name']} by {', '.join([artist['name'] for artist in item['artists']])}")
-
+                    
                     track_id = result["tracks"]["items"][0]["uri"]
                     track_ids.append(track_id)
                 else:
-                    result = sp.search(q=f"track:{track_name} artist:{artist_name}", type="track", limit=1)
-                    if result['tracks']['items']:
-                        track_id = result["tracks"]["items"][0]["uri"]
-                        track_ids.append(track_id)
-                    else:
-                        st.warning(f"No track found for {track_name} by {artist_name}")
+                    st.warning(f"No track found for {track_name} by {artist_name}")
 
             except (IndexError, ValueError):
                 st.warning(f"Could not parse song data: {song}")
@@ -131,36 +133,55 @@ def create_spotify_playlist(sp, song_list, playlist_name):
             return playlist["external_urls"]["spotify"]
     return None
 
+# Main app function with enhanced UI
 def main():
-    st.title("My Music Maker")
+    st.title("🎵 My Music Maker")
+    st.subheader("Create a playlist based on your mood!")
 
-    sp = get_spotify_client()
+    with st.form(key="playlist_form"):
+        # User inputs
+        mood = st.selectbox("Select your mood", ["Happy", "Sad", "Relaxed", "Calm", "Excited", "Silly"])
+        language = st.selectbox("Select language", ["English", "Hindi", "Punjabi"])
+        song_type = st.radio("Old, New, or Mix songs", ["Old", "New", "Mix"], horizontal=True)
+        num_songs = st.slider("How many songs would you like in your playlist?", 5, 30, 10)
+        artist_name = st.text_input("Optional: Enter artist name to include in playlist")  # Optional artist name
 
-    if sp is None:
-        st.warning("Please authorize the app to use Spotify")
-        return  
+        submit_button = st.form_submit_button(label="Generate Playlist 🎶")
 
-    # User inputs
-    mood = st.selectbox("Select your mood", ["Happy", "Sad"])
-    language = st.selectbox("Select language", ["English", "Hindi"])
-    song_type = st.radio("Old, New, or Mix songs", ["Old", "New", "Mix"])
-    playlist_name = st.text_input("Enter a name for your playlist", "My Mood Playlist")  # Custom playlist name
+    if submit_button:
+        sp = get_spotify_client()
 
-    if st.button("Generate Playlist"):
-        song_list = fetch_songs_from_llama3(mood, language, song_type)
+        if sp is None:
+            st.warning("Please authorize the app to use Spotify")
+            return  
+
+        # Fetch songs and suggested playlist name
+        song_list, suggested_playlist_name = fetch_songs_and_playlist_name(mood, language, song_type, artist_name, num_songs)
+
+        # Let the user edit the suggested playlist name or accept the default
+        playlist_name = st.text_input("Playlist Name", suggested_playlist_name)
 
         if song_list:
-            st.subheader("Generated Songs:")
+            st.subheader("Generated Songs 🎧")
             for song in song_list:
                 st.write(song)
 
-            playlist_url = create_spotify_playlist(sp, song_list, playlist_name)
+            save_playlist = st.radio("Do you want to save this playlist?", ("Yes", "No"), key="save_playlist_radio", horizontal=True)
 
-            if playlist_url:
-                st.success("Playlist created successfully!")
-                st.write(f"Check out your playlist: [Spotify Playlist]({playlist_url})")
+            if save_playlist == "Yes":
+                playlist_url = create_spotify_playlist(sp, song_list, playlist_name)
+
+                if playlist_url:
+                    st.success(f"Playlist '{playlist_name}' created successfully! 🎉")
+                    st.write(f"Check out your playlist: [Spotify Playlist]({playlist_url})")
+                else:
+                    st.error("Failed to create the playlist. No valid songs returned.")
             else:
-                st.error("Failed to create the playlist. No valid songs returned.")
+                st.write("Playlist was not saved.")
+
+            regenerate = st.radio("Do you want to generate a new playlist?", ("Yes", "No"), key="regenerate_radio", horizontal=True)
+            if regenerate == "Yes":
+                st.experimental_rerun()  # Restart the app to regenerate the playlist
         else:
             st.error("No songs fetched.")
 
