@@ -5,41 +5,57 @@ import os
 import re
 from groq import Groq
 
+# Spotify API Credentials
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-SPOTIFY_REDIRECT_URI = "http://localhost:8501"
+SPOTIFY_REDIRECT_URI = "http://localhost:8501"  # Update this to your app's redirect URI
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# Initialize SpotifyOAuth and return a Spotipy client
 def get_spotify_client():
+    # Adjust timeout to give Spotify more time in case of slow network
     sp_oauth = SpotifyOAuth(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
         redirect_uri=SPOTIFY_REDIRECT_URI,
         scope="playlist-modify-public",
-        cache_path=".cache"
+        cache_path=".cache",
+        requests_timeout=10  # Timeout after 10 seconds if no response
     )
 
     token_info = sp_oauth.get_cached_token()
 
     if token_info:
         if sp_oauth.is_token_expired(token_info):
-            token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
-        sp = spotipy.Spotify(auth=token_info['access_token'])
-        return sp
+            try:
+                token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
+                sp = spotipy.Spotify(auth=token_info['access_token'])
+                return sp
+            except Exception as e:
+                st.error(f"Error refreshing access token: {str(e)}")
+                return None
+        else:
+            sp = spotipy.Spotify(auth=token_info['access_token'])
+            return sp
 
-    query_params = st.experimental_get_query_params()
+    query_params =  st.query_params()
     auth_code = query_params.get('code', None)
 
     if not auth_code:
         auth_url = sp_oauth.get_authorize_url()
         st.write(f"[Click here to authorize Spotify]({auth_url})")
-        return None
+        st.stop()  # Stop execution until user authorizes
     else:
-        token_info = sp_oauth.get_access_token(auth_code[0])
-        st.experimental_set_query_params()  # Clear query params after successful authorization
-        sp = spotipy.Spotify(auth=token_info['access_token'])
-        return sp
+        try:
+            token_info = sp_oauth.get_access_token(auth_code[0])
+            st.experimental_set_query_params()  # Clear query params after successful authorization
+            sp = spotipy.Spotify(auth=token_info['access_token'])
+            return sp
+        except Exception as e:
+            st.error(f"Error during authentication: {str(e)}")
+            return None
 
+# Function to fetch suggested playlist name and songs from Groq
 def fetch_songs_and_playlist_name(mood, language, song_type, artist=None, num_songs=10):
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -61,11 +77,12 @@ def fetch_songs_and_playlist_name(mood, language, song_type, artist=None, num_so
     response = chat_completion.choices[0].message.content
     return parse_songs_and_playlist_name(response)
 
+# Function to parse songs and playlist name from the generated response
 def parse_songs_and_playlist_name(response):
     lines = response.split("\n")
 
     song_pattern = re.compile(r'^\d+\.\s*"?(.+?)"?\s*-\s*(.+)$')
-    
+
     song_list = []
     playlist_name = "My Mood Playlist"  # Default name
     playlist_name_found = False
@@ -73,10 +90,14 @@ def parse_songs_and_playlist_name(response):
     for line in lines:
         line = line.strip()
 
-        if not line or " - " not in line:
-            if "playlist name" in line.lower() and not playlist_name_found:
-                # Look for playlist name suggestion from the model
-                playlist_name = line.split(":")[-1].strip().capitalize()
+        if not line:
+            continue
+
+        # Look for playlist name suggestion
+        if not playlist_name_found and ("playlist name" in line.lower() or "playlist title" in line.lower()):
+            parts = line.split(":", 1)
+            if len(parts) > 1:
+                playlist_name = parts[1].strip().capitalize()
                 playlist_name_found = True
             continue
 
@@ -95,6 +116,7 @@ def parse_songs_and_playlist_name(response):
     unique_song_list = list(dict.fromkeys(song_list))
     return unique_song_list, playlist_name
 
+# Function to create Spotify playlist
 def create_spotify_playlist(sp, song_list, playlist_name):
     if song_list:
         if not playlist_name:
@@ -102,23 +124,29 @@ def create_spotify_playlist(sp, song_list, playlist_name):
             return None
 
         user_id = sp.current_user()["id"]
-        playlist = sp.user_playlist_create(user_id, playlist_name)
+        try:
+            playlist = sp.user_playlist_create(user_id, playlist_name)
+        except Exception as e:
+            st.error(f"Error creating playlist: {str(e)}")
+            return None
 
         track_ids = []
         for song in song_list:
             try:
                 track_name, artist_name = song.split(" - ")
 
+                # Refined search: First try with both track name and artist, then only track name
                 result = sp.search(q=f"track:{track_name} artist:{artist_name}", type="track", limit=5)
 
                 if not result['tracks']['items']:
+                    # If no result, try searching only by track name
                     result = sp.search(q=f"track:{track_name}", type="track", limit=5)
 
                 if result['tracks']['items']:
                     st.write(f"Search results for '{track_name}':")
                     for item in result['tracks']['items']:
                         st.write(f"Track: {item['name']} by {', '.join([artist['name'] for artist in item['artists']])}")
-                    
+
                     track_id = result["tracks"]["items"][0]["uri"]
                     track_ids.append(track_id)
                 else:
@@ -128,9 +156,18 @@ def create_spotify_playlist(sp, song_list, playlist_name):
                 st.warning(f"Could not parse song data: {song}")
 
         if track_ids:
-            sp.user_playlist_add_tracks(user_id, playlist["id"], track_ids)
-            return playlist["external_urls"]["spotify"]
-    return None
+            try:
+                sp.user_playlist_add_tracks(user_id, playlist["id"], track_ids)
+                return playlist["external_urls"]["spotify"]
+            except Exception as e:
+                st.error(f"Error adding tracks to playlist: {str(e)}")
+                return None
+        else:
+            st.error("No valid tracks to add to the playlist.")
+            return None
+    else:
+        st.error("Song list is empty.")
+        return None
 
 # Main app function with enhanced UI
 def main():
@@ -152,15 +189,18 @@ def main():
 
         if sp is None:
             st.warning("Please authorize the app to use Spotify")
-            return  
+            st.stop()  # Stop execution until user authorizes
 
-        song_list, suggested_playlist_name = fetch_songs_and_playlist_name(mood, language, song_type, artist_name, num_songs)
+        # Fetch songs and suggested playlist name
+        with st.spinner("Generating playlist..."):
+            song_list, suggested_playlist_name = fetch_songs_and_playlist_name(mood, language, song_type, artist_name, num_songs)
 
+        # Let the user edit the suggested playlist name or accept the default
         playlist_name = st.text_input("Playlist Name", suggested_playlist_name)
 
         if not playlist_name:
             st.error("Please enter a valid playlist name.")
-            return
+            st.stop()
 
         if song_list:
             st.subheader("Generated Songs 🎧")
@@ -170,7 +210,8 @@ def main():
             save_playlist = st.radio("Do you want to save this playlist?", ("Yes", "No"), key="save_playlist_radio", horizontal=True)
 
             if save_playlist == "Yes":
-                playlist_url = create_spotify_playlist(sp, song_list, playlist_name)
+                with st.spinner("Creating your playlist on Spotify..."):
+                    playlist_url = create_spotify_playlist(sp, song_list, playlist_name)
 
                 if playlist_url:
                     st.success(f"Playlist '{playlist_name}' created successfully! 🎉")
