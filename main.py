@@ -5,13 +5,11 @@ import os
 import re
 from groq import Groq
 
-# Spotify API Credentials
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 SPOTIFY_REDIRECT_URI = "http://localhost:8501"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Initialize SpotifyOAuth and return a Spotipy client
 def get_spotify_client():
     sp_oauth = SpotifyOAuth(
         client_id=SPOTIFY_CLIENT_ID,
@@ -42,7 +40,6 @@ def get_spotify_client():
         sp = spotipy.Spotify(auth=token_info['access_token'])
         return sp
 
-# Function to fetch suggested playlist name and songs from Groq
 def fetch_songs_and_playlist_name(mood, language, song_type, artist=None, num_songs=10):
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -64,7 +61,6 @@ def fetch_songs_and_playlist_name(mood, language, song_type, artist=None, num_so
     response = chat_completion.choices[0].message.content
     return parse_songs_and_playlist_name(response)
 
-# Function to parse songs and playlist name from the generated response
 def parse_songs_and_playlist_name(response):
     lines = response.split("\n")
 
@@ -99,9 +95,12 @@ def parse_songs_and_playlist_name(response):
     unique_song_list = list(dict.fromkeys(song_list))
     return unique_song_list, playlist_name
 
-# Function to create Spotify playlist
 def create_spotify_playlist(sp, song_list, playlist_name):
     if song_list:
+        if not playlist_name:
+            st.error("Playlist name is missing. Please enter a valid name.")
+            return None
+
         user_id = sp.current_user()["id"]
         playlist = sp.user_playlist_create(user_id, playlist_name)
 
@@ -155,11 +154,13 @@ def main():
             st.warning("Please authorize the app to use Spotify")
             return  
 
-        # Fetch songs and suggested playlist name
         song_list, suggested_playlist_name = fetch_songs_and_playlist_name(mood, language, song_type, artist_name, num_songs)
 
-        # Let the user edit the suggested playlist name or accept the default
         playlist_name = st.text_input("Playlist Name", suggested_playlist_name)
+
+        if not playlist_name:
+            st.error("Please enter a valid playlist name.")
+            return
 
         if song_list:
             st.subheader("Generated Songs 🎧")
@@ -181,7 +182,8 @@ def main():
 
             regenerate = st.radio("Do you want to generate a new playlist?", ("Yes", "No"), key="regenerate_radio", horizontal=True)
             if regenerate == "Yes":
-                st.experimental_rerun()  # Restart the app to regenerate the playlist
+                # Use JavaScript to reload the page
+                st.write('<script>location.reload()</script>', unsafe_allow_html=True)
         else:
             st.error("No songs fetched.")
 
